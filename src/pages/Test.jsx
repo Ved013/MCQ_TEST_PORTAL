@@ -1,25 +1,36 @@
 import { useEffect, useState, useRef } from "react";
+import { useParams } from "react-router-dom";
 import axios from "axios";
 import "../styles/quiz.css";
 
+const API = "https://charismatic-happiness-production-dc36.up.railway.app";
+
 function Test() {
 
-  const [questions, setQuestions] = useState([]);
-  const [answers, setAnswers] = useState([]);
+  const { suiteId } = useParams(); // for multi-suite support
+
+  const [questions, setQuestions]             = useState([]);
+  const [answers, setAnswers]                 = useState([]);
   const [currentQuestion, setCurrentQuestion] = useState(0);
-  const [timeLeft, setTimeLeft] = useState(null); // ✅ null = not loaded yet
-  const timerStarted = useRef(false); // ✅ prevents multiple timers
+  const [timeLeft, setTimeLeft]               = useState(null);
+  const timerStarted                          = useRef(false);
+
+  // Feature 7: Mark for Review
+  const [markedForReview, setMarkedForReview] = useState([]);
+
+  // Feature 6: Confirmation dialog
+  const [showConfirm, setShowConfirm] = useState(false);
 
   useEffect(() => {
     fetchQuestions();
     fetchSettings();
   }, []);
 
-  // ✅ FIXED: Timer only starts ONCE when both questions and timeLeft are ready
+  // Timer
   useEffect(() => {
     if (questions.length === 0 || timeLeft === null || timerStarted.current) return;
 
-    timerStarted.current = true; // ✅ mark timer as started
+    timerStarted.current = true;
 
     const timer = setInterval(() => {
       setTimeLeft((prev) => {
@@ -35,12 +46,9 @@ function Test() {
     return () => clearInterval(timer);
   }, [questions, timeLeft]);
 
-  // ✅ FIXED: parseInt to ensure number not string
   const fetchSettings = async () => {
     try {
-      const res = await axios.get(
-        "https://mcqtestportal-production.up.railway.app/api/settings"
-      );
+      const res = await axios.get(`${API}/api/settings`);
       if (res.data && res.data.examDuration) {
         setTimeLeft(parseInt(res.data.examDuration) * 60);
       }
@@ -51,9 +59,12 @@ function Test() {
 
   const fetchQuestions = async () => {
     try {
-      const res = await axios.get(
-        "https://mcqtestportal-production.up.railway.app/api/questions/all"
-      );
+      // Use suiteId-specific random endpoint if available, else fallback to /all
+      const url = suiteId
+        ? `${API}/api/questions/${suiteId}/random`
+        : `${API}/api/questions/all`;
+
+      const res = await axios.get(url);
       const fetchedQuestions = res.data;
       setQuestions(fetchedQuestions);
       setAnswers(new Array(fetchedQuestions.length).fill(""));
@@ -68,49 +79,103 @@ function Test() {
     setAnswers(updatedAnswers);
   };
 
+  // Feature 7: Toggle mark for review
+  const handleMarkForReview = () => {
+    setMarkedForReview((prev) =>
+      prev.includes(currentQuestion)
+        ? prev.filter((i) => i !== currentQuestion)
+        : [...prev, currentQuestion]
+    );
+  };
+
+  // Feature 3 + 6: Block submit if unanswered, then show confirm dialog
+  const handleSubmitClick = () => {
+    const unanswered = answers.filter((a) => !a || a === "").length;
+    if (unanswered > 0) {
+      const firstUnanswered = answers.findIndex((a) => !a || a === "");
+      setCurrentQuestion(firstUnanswered);
+      alert(
+        `Please answer all questions before submitting.\n\n${unanswered} question(s) still unanswered.\n\nJumping to Question ${firstUnanswered + 1}.`
+      );
+      return;
+    }
+    setShowConfirm(true);
+  };
+
   const handleSubmit = async () => {
+    setShowConfirm(false);
     try {
-      let finalScore = 0;
-      const categoryMap = {};
+      let finalScore      = 0;
+      let totalMarksCount = 0;
+      const categoryMap   = {};
 
       questions.forEach((q, index) => {
-        const category = q.category || "General";
+        const rawCategory = q.category;
+        const categoryKey = Array.isArray(rawCategory)
+          ? rawCategory.join(",")
+          : rawCategory || "General";
 
-        if (!categoryMap[category]) {
-          categoryMap[category] = {
-            category: category,
-            score: 0,
-            total: 0,
+        const questionMarks = q.marks ?? q.totalMarks ?? 1;
+
+        if (!categoryMap[categoryKey]) {
+          categoryMap[categoryKey] = {
+            category:    categoryKey,
+            score:       0,
+            total:       0,
+            earnedMarks: 0,
+            totalMarks:  0,
           };
         }
 
-        categoryMap[category].total += 1;
+        categoryMap[categoryKey].total      += 1;
+        categoryMap[categoryKey].totalMarks += questionMarks;
+        totalMarksCount                     += questionMarks;
 
-        if (answers[index] === q.correctAnswer) {
+        const isCorrect = answers[index] === q.correctAnswer;
+        if (isCorrect) {
           finalScore++;
-          categoryMap[category].score += 1;
+          categoryMap[categoryKey].score       += 1;
+          categoryMap[categoryKey].earnedMarks += questionMarks;
         }
       });
 
       const categoryResults = Object.values(categoryMap).map((item) => ({
-        category: item.category,
-        score: item.score,
-        total: item.total,
-        percentage: Math.round((item.score / item.total) * 100),
+        category:   item.category,
+        score:      item.score,
+        total:      item.total,
+        earnedMarks: item.earnedMarks,
+        totalMarks:  item.totalMarks,
+        percentage:  item.totalMarks > 0
+          ? Math.round((item.earnedMarks / item.totalMarks) * 100)
+          : 0,
       }));
+
+      // Feature 8: Compute passed flag from settings
+      let passed = false;
+      try {
+        const settingsRes = await axios.get(`${API}/api/settings`);
+        const passingPct  = settingsRes.data?.passingPercentage ?? 50;
+        const pct         = totalMarksCount > 0
+          ? Math.round((finalScore / totalMarksCount) * 100)
+          : 0;
+        passed = pct >= passingPct;
+      } catch (_) {
+        // if settings fetch fails, default passed = false
+      }
 
       const user = JSON.parse(localStorage.getItem("user")) || {};
 
-      await axios.post(
-        "https://mcqtestportal-production.up.railway.app/api/results/add",
-        {
-          userName: user.name || "Student",
-          userEmail: user.email || "No Email",
-          score: finalScore,
-          totalQuestions: questions.length,
-          categoryResults,
-        }
-      );
+      await axios.post(`${API}/api/results/add`, {
+        userName:       user.name        || "Candidate",
+        userEmail:      user.email       || "No Email",
+        project:        user.project     || "General",   // Feature 11
+        designation:    user.designation || "",          // Feature 11
+        score:          finalScore,
+        totalMarks:     totalMarksCount,
+        totalQuestions: questions.length,
+        categoryResults,
+        passed,                                          // Feature 8
+      });
 
       window.location.href = "/view-results";
 
@@ -120,7 +185,7 @@ function Test() {
     }
   };
 
-  // ✅ Show loading until settings are fetched
+  // Loading state
   if (timeLeft === null) {
     return (
       <div style={{
@@ -130,15 +195,21 @@ function Test() {
         justifyContent: "center",
         background: "#f5f1eb",
         fontSize: "20px",
-        color: "#2d5d50"
+        color: "#2d5d50",
       }}>
         Loading exam...
       </div>
     );
   }
 
-  const minutes = Math.floor(timeLeft / 60);
-  const seconds = timeLeft % 60;
+  const minutes       = Math.floor(timeLeft / 60);
+  const seconds       = timeLeft % 60;
+  const answeredCount  = answers.filter((a) => a && a !== "").length;
+  const unansweredCount = questions.length - answeredCount;
+  const isMarked       = markedForReview.includes(currentQuestion);
+
+  // Timer colour: red when under 60 seconds
+  const timerColor = timeLeft <= 60 ? "#dc2626" : "#1A3D28";
 
   return (
     <div className="quiz-page">
@@ -147,14 +218,33 @@ function Test() {
 
       <div className="quiz-container">
 
-        {/* LEFT QUESTION PANEL */}
+        {/* ── LEFT: QUESTION TRAY ─────────────────────────── */}
         <div className="question-tray-card">
           <h4>Questions</h4>
+
+          {/* Legend */}
+          <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginBottom: "14px", fontSize: "11px", color: "#888" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "7px" }}>
+              <span style={{ width: "14px", height: "14px", borderRadius: "4px", background: "#22c55e", display: "inline-block" }} />
+              Answered ({answeredCount})
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: "7px" }}>
+              <span style={{ width: "14px", height: "14px", borderRadius: "4px", background: "#f97316", display: "inline-block" }} />
+              Marked for Review ({markedForReview.length})
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: "7px" }}>
+              <span style={{ width: "14px", height: "14px", borderRadius: "4px", background: "#e5e7eb", border: "1px solid #ccc", display: "inline-block" }} />
+              Unanswered ({unansweredCount})
+            </div>
+          </div>
+
+          {/* Question number buttons */}
           <div id="question-tray">
             {questions.map((q, index) => {
               let btnClass = "question-number";
-              if (answers[index]) btnClass += " answered";
-              if (currentQuestion === index) btnClass += " active";
+              if (markedForReview.includes(index))  btnClass += " reviewed";
+              else if (answers[index])              btnClass += " answered";
+              if (currentQuestion === index)        btnClass += " active";
               return (
                 <button
                   key={index}
@@ -168,29 +258,27 @@ function Test() {
           </div>
         </div>
 
-        {/* RIGHT QUIZ SECTION */}
+        {/* ── RIGHT: QUIZ SECTION ─────────────────────────── */}
         <div className="card card--quiz">
 
           <div className="quiz-top">
             <p className="question-count">
               QUESTION {currentQuestion + 1} OF {questions.length}
             </p>
-            <div className="timer">
+            <div className="timer" style={{ color: timerColor, fontWeight: timeLeft <= 60 ? "800" : undefined }}>
               {minutes}:{seconds.toString().padStart(2, "0")}
             </div>
           </div>
 
-          {/* PROGRESS BAR */}
+          {/* Progress bar */}
           <div className="progress-bar">
             <div
               className="progress-fill"
-              style={{
-                width: `${((currentQuestion + 1) / questions.length) * 100}%`,
-              }}
-            ></div>
+              style={{ width: `${((currentQuestion + 1) / questions.length) * 100}%` }}
+            />
           </div>
 
-          {/* QUESTION */}
+          {/* Question + options */}
           {questions.length > 0 && (
             <>
               <h2 className="question-text">
@@ -201,9 +289,7 @@ function Test() {
                 {questions[currentQuestion]?.options.map((option, index) => (
                   <button
                     key={index}
-                    className={`option-btn ${
-                      answers[currentQuestion] === option ? "selected" : ""
-                    }`}
+                    className={`option-btn ${answers[currentQuestion] === option ? "selected" : ""}`}
                     onClick={() => handleSelect(option)}
                   >
                     {option}
@@ -213,8 +299,9 @@ function Test() {
             </>
           )}
 
-          {/* BUTTONS */}
+          {/* Buttons row */}
           <div className="quiz-buttons">
+
             <button
               className="prev-btn"
               disabled={currentQuestion === 0}
@@ -223,8 +310,28 @@ function Test() {
               ← Previous
             </button>
 
+            {/* Feature 7: Mark for Review */}
+            <button
+              className={`review-btn${isMarked ? " review-btn--active" : ""}`}
+              onClick={handleMarkForReview}
+              style={{
+                padding: "10px 18px",
+                borderRadius: "10px",
+                border: `2px solid ${isMarked ? "#f97316" : "#d1d5db"}`,
+                background: isMarked ? "#fff7ed" : "#f9fafb",
+                color: isMarked ? "#ea580c" : "#6b7280",
+                fontWeight: "700",
+                fontSize: "13px",
+                cursor: "pointer",
+                transition: "all 0.15s",
+              }}
+            >
+              {isMarked ? "🟠 Marked" : "⚑ Mark for Review"}
+            </button>
+
+            {/* Feature 3 + 6: Submit or Next */}
             {currentQuestion === questions.length - 1 ? (
-              <button className="next-btn" onClick={handleSubmit}>
+              <button className="next-btn" onClick={handleSubmitClick}>
                 Submit Test
               </button>
             ) : (
@@ -235,10 +342,112 @@ function Test() {
                 Next →
               </button>
             )}
+
           </div>
+
+          {/* Unanswered warning — shown on last question */}
+          {currentQuestion === questions.length - 1 && unansweredCount > 0 && (
+            <div style={{
+              marginTop: "14px",
+              padding: "10px 16px",
+              background: "#fef3c7",
+              border: "1px solid #fcd34d",
+              borderRadius: "10px",
+              fontSize: "13px",
+              color: "#92400e",
+              fontWeight: "600",
+            }}>
+              ⚠️ {unansweredCount} question{unansweredCount > 1 ? "s" : ""} still unanswered. All questions are compulsory.
+            </div>
+          )}
 
         </div>
       </div>
+
+      {/* ── Feature 6: Confirmation Modal ───────────────────── */}
+      {showConfirm && (
+        <div style={{
+          position: "fixed", inset: 0,
+          background: "rgba(0,0,0,0.55)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          zIndex: 999,
+        }}>
+          <div style={{
+            background: "#fff",
+            borderRadius: "24px",
+            padding: "40px 36px",
+            maxWidth: "420px",
+            width: "90%",
+            textAlign: "center",
+            boxShadow: "0 20px 60px rgba(0,0,0,0.2)",
+          }}>
+            <div style={{ fontSize: "40px", marginBottom: "12px" }}>📋</div>
+            <h2 style={{ fontSize: "22px", fontWeight: "800", color: "#1A3D28", marginBottom: "8px" }}>
+              Submit Test?
+            </h2>
+            <p style={{ color: "#666", fontSize: "14px", marginBottom: "20px" }}>
+              Please review your summary before submitting.
+            </p>
+
+            <div style={{ display: "flex", justifyContent: "center", gap: "16px", marginBottom: "28px", flexWrap: "wrap" }}>
+              <div style={{ background: "#f0faf5", borderRadius: "12px", padding: "12px 20px", minWidth: "100px" }}>
+                <div style={{ fontSize: "24px", fontWeight: "800", color: "#1A3D28" }}>{answeredCount}</div>
+                <div style={{ fontSize: "12px", color: "#888" }}>Answered</div>
+              </div>
+              <div style={{ background: markedForReview.length > 0 ? "#fff7ed" : "#f9fafb", borderRadius: "12px", padding: "12px 20px", minWidth: "100px" }}>
+                <div style={{ fontSize: "24px", fontWeight: "800", color: markedForReview.length > 0 ? "#ea580c" : "#aaa" }}>
+                  {markedForReview.length}
+                </div>
+                <div style={{ fontSize: "12px", color: "#888" }}>Marked for Review</div>
+              </div>
+              <div style={{ background: "#f9fafb", borderRadius: "12px", padding: "12px 20px", minWidth: "100px" }}>
+                <div style={{ fontSize: "24px", fontWeight: "800", color: "#aaa" }}>{questions.length}</div>
+                <div style={{ fontSize: "12px", color: "#888" }}>Total Questions</div>
+              </div>
+            </div>
+
+            {markedForReview.length > 0 && (
+              <div style={{
+                background: "#fff7ed",
+                border: "1px solid #fed7aa",
+                borderRadius: "10px",
+                padding: "10px 14px",
+                marginBottom: "20px",
+                fontSize: "13px",
+                color: "#92400e",
+              }}>
+                ⚠️ You have {markedForReview.length} question{markedForReview.length > 1 ? "s" : ""} marked for review. Are you sure you want to submit?
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: "12px", justifyContent: "center" }}>
+              <button
+                onClick={() => setShowConfirm(false)}
+                style={{
+                  padding: "12px 28px", borderRadius: "12px",
+                  border: "1.5px solid #ddd", background: "#fff",
+                  color: "#555", fontWeight: "700", fontSize: "14px",
+                  cursor: "pointer",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSubmit}
+                style={{
+                  padding: "12px 28px", borderRadius: "12px",
+                  border: "none", background: "#2D5F3F",
+                  color: "#fff", fontWeight: "700", fontSize: "14px",
+                  cursor: "pointer",
+                }}
+              >
+                Yes, Submit →
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

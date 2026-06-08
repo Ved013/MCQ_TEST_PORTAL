@@ -1,5 +1,5 @@
 // src/pages/StudentTest.jsx
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import axios from "axios";
 
@@ -9,31 +9,55 @@ const GREEN      = "#2D5F3F";
 const GREEN_DARK = "#1A3D28";
 const BG         = "#EEE9E0";
 const WHITE      = "#ffffff";
+const ORANGE     = "#f97316";
 
-// Build category breakdown from questions + answers
+// ── Helper: get categories for a question (always returns array) ──
+function getQuestionCats(q) {
+  if (Array.isArray(q.category) && q.category.length > 0) return q.category;
+  if (typeof q.category === "string" && q.category.trim()) return [q.category.trim()];
+  return ["Uncategorized"];
+}
+
+// ── Scoring helpers ──────────────────────────────────────────
+function scoreQuestion(q, selectedArr) {
+  const correctArr   = Array.isArray(q.correctAnswer) ? q.correctAnswer : [q.correctAnswer];
+  const totalCorrect = correctArr.length;
+  const hits         = selectedArr.filter(i => correctArr.includes(i)).length;
+  const wrongs       = selectedArr.filter(i => !correctArr.includes(i)).length;
+  const earnedFrac   = Math.max(0, (hits - wrongs) / totalCorrect);
+  return { earnedFrac, isRight: earnedFrac === 1, correctArr };
+}
+
+// FIXED: each question's marks/score count toward ALL its categories
 function buildCategoryStats(questions, answers) {
   const cats = {};
   questions.forEach(q => {
-    const cat = q.category || "Uncategorized";
-    if (!cats[cat]) cats[cat] = { total: 0, correct: 0, marks: 0, earnedMarks: 0 };
-    const marks   = q.marks ?? 1;
-    const selected = answers[q._id] ?? -1;
-    const isRight  = selected === q.correctAnswer;
-    cats[cat].total      += 1;
-    cats[cat].marks      += marks;
-    if (isRight) {
-      cats[cat].correct    += 1;
-      cats[cat].earnedMarks += marks;
-    }
+    const questionCats = getQuestionCats(q);
+    const marks        = q.marks ?? 1;
+    const selectedArr  = Array.isArray(answers[q._id]) ? answers[q._id] : [];
+    const { earnedFrac, isRight } = scoreQuestion(q, selectedArr);
+
+    questionCats.forEach(cat => {
+      if (!cats[cat]) cats[cat] = { total: 0, correct: 0, marks: 0, earnedMarks: 0 };
+      cats[cat].total       += 1;
+      cats[cat].marks       += marks;
+      cats[cat].earnedMarks += earnedFrac * marks;
+      if (isRight) cats[cat].correct += 1;
+    });
   });
   return cats;
 }
 
-// Color for a percentage
 function pctColor(pct) {
   if (pct >= 75) return GREEN;
   if (pct >= 50) return "#f59e0b";
   return "#dc2626";
+}
+
+function formatTime(secs) {
+  const m = Math.floor(secs / 60).toString().padStart(2, "0");
+  const s = (secs % 60).toString().padStart(2, "0");
+  return `${m}:${s}`;
 }
 
 export default function StudentTest() {
@@ -48,7 +72,18 @@ export default function StudentTest() {
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult]         = useState(null);
   const [error, setError]           = useState("");
-  const [activeTab, setActiveTab]   = useState("summary"); // "summary" | "review"
+
+  const [markedForReview, setMarkedForReview] = useState([]);
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [passingPct, setPassingPct]   = useState(50);
+  const [currentQuestion, setCurrentQuestion] = useState(0);
+
+  const [timeLeft, setTimeLeft]       = useState(null);
+  const [showWarning, setShowWarning] = useState(false);
+  const timerRef                      = useRef(null);
+  const answersRef                    = useRef(answers);
+
+  useEffect(() => { answersRef.current = answers; }, [answers]);
 
   const user = (() => {
     try { return JSON.parse(localStorage.getItem("user")) || {}; }
@@ -58,14 +93,22 @@ export default function StudentTest() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const token = localStorage.getItem("token");
+        const token   = localStorage.getItem("token");
         const headers = { Authorization: `Bearer ${token}` };
-        const [suiteRes, qRes] = await Promise.all([
+
+        const [suiteRes, qRes, settingsRes] = await Promise.all([
           axios.get(`${API}/api/test-suites/${suiteId}`, { headers }),
           axios.get(`${API}/api/test-suites/${suiteId}/questions`, { headers }),
+          axios.get(`${API}/api/settings`),
         ]);
+
         setSuite(suiteRes.data);
         setQuestions(qRes.data);
+
+        const durationMins = settingsRes.data?.examDuration     || 30;
+        const passing      = settingsRes.data?.passingPercentage ?? 50;
+        setTimeLeft(durationMins * 60);
+        setPassingPct(passing);
       } catch (err) {
         console.error("Failed to load test:", err);
         setError("Could not load this test. Please go back and try again.");
@@ -76,28 +119,86 @@ export default function StudentTest() {
     fetchData();
   }, [suiteId]);
 
+  useEffect(() => {
+    if (timeLeft === null || submitted) return;
+    timerRef.current = setInterval(() => {
+      setTimeLeft(prev => {
+        if (prev <= 1) { clearInterval(timerRef.current); autoSubmit(); return 0; }
+        if (prev === 61) setShowWarning(true);
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timerRef.current);
+  }, [timeLeft, submitted]);
+
+  const autoSubmit = () => { setShowWarning(false); handleSubmitInternal(true); };
+
   const handleSelect = (questionId, optionIndex) => {
     if (submitted) return;
-    setAnswers(prev => ({ ...prev, [questionId]: optionIndex }));
+    setAnswers(prev => {
+      const current = Array.isArray(prev[questionId]) ? prev[questionId] : [];
+      const already = current.includes(optionIndex);
+      const updated = already ? current.filter(i => i !== optionIndex) : [...current, optionIndex];
+      const copy = { ...prev };
+      if (updated.length === 0) { delete copy[questionId]; } else { copy[questionId] = updated; }
+      return copy;
+    });
   };
 
-  const handleSubmit = async () => {
-    const unanswered = questions.filter(q => answers[q._id] === undefined);
-    if (unanswered.length > 0) {
-      if (!window.confirm(`You have ${unanswered.length} unanswered question(s). Submit anyway?`)) return;
+  const handleMarkForReview = (idx) => {
+    setMarkedForReview(prev =>
+      prev.includes(idx) ? prev.filter(i => i !== idx) : [...prev, idx]
+    );
+  };
+
+  const jumpToQuestion = (idx) => {
+    setCurrentQuestion(idx);
+    document.getElementById(`question-${idx}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
+
+  const handleSubmitClick = () => {
+    const unanswered = questions.filter(q => !answers[q._id] || answers[q._id].length === 0).length;
+    if (unanswered > 0) {
+      const firstIdx = questions.findIndex(q => !answers[q._id] || answers[q._id].length === 0);
+      document.getElementById(`question-${firstIdx}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      alert(`Please answer all questions before submitting.\n\n${unanswered} question(s) still unanswered.`);
+      return;
     }
+    setShowConfirm(true);
+  };
+
+  const handleSubmitInternal = async (isAuto = false) => {
+    setShowConfirm(false);
+    clearInterval(timerRef.current);
     setSubmitting(true);
     try {
       const token = localStorage.getItem("token");
+      const currentAnswers = isAuto ? answersRef.current : answers;
+
+      let finalScore = 0, totalMarksCount = 0;
+      questions.forEach(q => {
+        const marks = q.marks ?? 1;
+        const selectedArr = Array.isArray(currentAnswers[q._id]) ? currentAnswers[q._id] : [];
+        const { earnedFrac } = scoreQuestion(q, selectedArr);
+        totalMarksCount += marks;
+        finalScore      += earnedFrac * marks;
+      });
+      const pct    = totalMarksCount > 0 ? Math.round((finalScore / totalMarksCount) * 100) : 0;
+      const passed = pct >= passingPct;
+
       const payload = {
         suiteId,
-        studentName:  user.name  || "Student",
-        studentEmail: user.email || "",
+        CandidateName:  user.name,
+        CandidateEmail: user.email,
+        project:        user.project     || "General",
+        designation:    user.designation || "",
+        passed,
         answers: questions.map(q => ({
-          questionId:     q._id,
-          selectedOption: answers[q._id] ?? -1,
+          questionId:      q._id,
+          selectedOptions: currentAnswers[q._id] ?? [],
         })),
       };
+
       const res = await axios.post(`${API}/api/results`, payload, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -105,285 +206,251 @@ export default function StudentTest() {
       setSubmitted(true);
     } catch (err) {
       console.error("Submit error:", err);
-      alert(err.response?.data?.message || "Failed to submit. Please try again.");
+      alert("Failed to submit. Please check your connection.");
     } finally {
       setSubmitting(false);
     }
   };
 
-  // ── Results screen ──
+  // Results Screen
   if (submitted && result) {
-    const pct        = Math.round((result.score / result.totalMarks) * 100) || 0;
-    const passed     = pct >= 50;
+    const pct    = Math.round((result.score / result.totalMarks) * 100) || 0;
+    const passed = pct >= passingPct;
     const catStats   = buildCategoryStats(questions, answers);
     const catEntries = Object.entries(catStats);
-    const hasCategories = catEntries.some(([cat]) => cat !== "Uncategorized") || catEntries.length > 1;
+
+    const handleDownloadCertificate = () => {
+      const win = window.open("", "_blank");
+      win.document.write(`
+        <html>
+        <body style="font-family:Georgia,serif;text-align:center;padding:80px;color:#1A3D28;background:#fff;">
+          <div style="border:10px double #2D5F3F;padding:50px;">
+            <h1>Certificate of Completion</h1>
+            <p>This certifies that</p>
+            <h2>${user.name}</h2>
+            <p>has passed the assessment</p>
+            <h3>${suite?.name}</h3>
+            <p style="font-size:24px;">Score: ${pct}%</p>
+            <p>Date: ${new Date().toLocaleDateString()}</p>
+          </div>
+          <script>window.print();</script>
+        </body>
+        </html>
+      `);
+      win.document.close();
+    };
 
     return (
-      <div style={{ minHeight: "100vh", background: BG, fontFamily: "'Segoe UI', sans-serif", padding: "24px 16px" }}>
-        <div style={{ maxWidth: "520px", margin: "0 auto" }}>
-
-          {/* ── Header card ── */}
-          <div style={{ background: WHITE, borderRadius: "20px", padding: "32px 28px", textAlign: "center", boxShadow: "0 8px 32px rgba(0,0,0,0.08)", marginBottom: "16px" }}>
-            <div style={{ fontSize: "48px", marginBottom: "10px" }}>{passed ? "🎉" : "📚"}</div>
-            <h1 style={{ fontSize: "21px", fontWeight: "700", color: GREEN_DARK, margin: "0 0 4px" }}>
-              {passed ? "Great job!" : "Keep practising!"}
-            </h1>
-            <p style={{ color: "#888", fontSize: "13px", margin: "0 0 20px" }}>{suite?.name}</p>
-
-            {/* Big score */}
-            <div style={{ background: BG, borderRadius: "14px", padding: "18px", marginBottom: "16px" }}>
-              <div style={{ fontSize: "52px", fontWeight: "800", color: pctColor(pct), lineHeight: 1 }}>{pct}%</div>
-              <div style={{ fontSize: "14px", color: "#888", marginTop: "6px" }}>
-                {result.score} / {result.totalMarks} marks
-              </div>
-              <div style={{ fontSize: "12px", color: "#aaa", marginTop: "3px" }}>
-                {result.correctAnswers} correct · {questions.length - result.correctAnswers} wrong · {questions.length - Object.keys(answers).length} skipped
-              </div>
+      <div style={{ minHeight:"100vh", background: BG, padding:"24px 16px" }}>
+        <div style={{ maxWidth:"520px", margin:"0 auto" }}>
+          <div style={{ background: WHITE, borderRadius:"20px", padding:"32px", textAlign:"center", boxShadow:"0 8px 32px rgba(0,0,0,0.08)" }}>
+            <div style={{ fontSize:"48px" }}>{passed ? "🎉" : "📚"}</div>
+            <h1 style={{ color: GREEN_DARK }}>{passed ? "Passed!" : "Try Again"}</h1>
+            <div style={{ background: BG, borderRadius:"14px", padding:"20px", margin:"20px 0" }}>
+              <p style={{ fontSize:"12px", color:"#888", textTransform:"uppercase" }}>Your Result</p>
+              <p style={{ fontSize:"40px", fontWeight:"800", color: GREEN_DARK, margin:0 }}>{result.score} / {result.totalMarks}</p>
+              <p style={{ fontSize:"24px", color: pctColor(pct), margin:0 }}>{pct}%</p>
             </div>
 
-            {/* Tabs */}
-            <div style={{ display: "flex", gap: "8px", justifyContent: "center" }}>
-              {["summary", "review"].map(tab => (
-                <button
-                  key={tab}
-                  onClick={() => setActiveTab(tab)}
-                  style={{
-                    padding: "8px 20px", borderRadius: "999px", fontSize: "13px", fontWeight: "600", cursor: "pointer", border: "none",
-                    background: activeTab === tab ? GREEN : "#f3f4f6",
-                    color:      activeTab === tab ? WHITE : "#555",
-                  }}
-                >
-                  {tab === "summary" ? "📊 By Category" : "📝 Review"}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* ── Category breakdown tab ── */}
-          {activeTab === "summary" && (
-            <div style={{ background: WHITE, borderRadius: "16px", padding: "20px 24px", boxShadow: "0 4px 16px rgba(0,0,0,0.06)", marginBottom: "16px" }}>
-              <p style={{ fontSize: "11px", fontWeight: "700", color: "#8A8A7E", letterSpacing: "0.08em", textTransform: "uppercase", margin: "0 0 16px" }}>
-                Category Breakdown
-              </p>
-
-              {!hasCategories ? (
-                <p style={{ color: "#aaa", fontSize: "13px", textAlign: "center", padding: "12px 0" }}>
-                  No categories assigned to questions in this test.
-                </p>
-              ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
-                  {catEntries.map(([cat, stats]) => {
-                    const catPct = Math.round((stats.earnedMarks / stats.marks) * 100) || 0;
-                    const color  = pctColor(catPct);
-                    return (
-                      <div key={cat}>
-                        {/* Category label row */}
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
-                          <span style={{ fontSize: "14px", fontWeight: "600", color: GREEN_DARK }}>{cat}</span>
-                          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                            <span style={{ fontSize: "12px", color: "#888" }}>
-                              {stats.correct}/{stats.total} correct
-                            </span>
-                            <span style={{ fontSize: "13px", fontWeight: "700", color, minWidth: "40px", textAlign: "right" }}>
-                              {catPct}%
-                            </span>
-                          </div>
-                        </div>
-                        {/* Progress bar */}
-                        <div style={{ height: "8px", background: "#f0f0ea", borderRadius: "999px", overflow: "hidden" }}>
-                          <div style={{
-                            height: "100%",
-                            width: `${catPct}%`,
-                            background: color,
-                            borderRadius: "999px",
-                            transition: "width 0.6s ease",
-                          }} />
-                        </div>
-                        {/* Marks */}
-                        <div style={{ fontSize: "11px", color: "#aaa", marginTop: "4px" }}>
-                          {stats.earnedMarks} / {stats.marks} marks
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* ── Per-question review tab ── */}
-          {activeTab === "review" && (
-            <div style={{ background: WHITE, borderRadius: "16px", padding: "20px 24px", boxShadow: "0 4px 16px rgba(0,0,0,0.06)", marginBottom: "16px" }}>
-              <p style={{ fontSize: "11px", fontWeight: "700", color: "#8A8A7E", letterSpacing: "0.08em", textTransform: "uppercase", margin: "0 0 14px" }}>
-                Question Review
-              </p>
-              <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                {questions.map((q, i) => {
-                  const selected = answers[q._id] ?? -1;
-                  const isRight  = selected === q.correctAnswer;
+            {/* Category breakdown */}
+            {catEntries.length > 0 && (
+              <div style={{ marginBottom:"20px", textAlign:"left" }}>
+                <p style={{ fontSize:"12px", color:"#888", textTransform:"uppercase", marginBottom:"10px", textAlign:"center" }}>Category Breakdown</p>
+                {catEntries.map(([cat, s]) => {
+                  const catPct = s.marks > 0 ? Math.round((s.earnedMarks / s.marks) * 100) : 0;
                   return (
-                    <div key={q._id} style={{ background: isRight ? "#f0fdf4" : "#fff5f5", border: `1px solid ${isRight ? "#bbf7d0" : "#fecaca"}`, borderRadius: "12px", padding: "12px 16px" }}>
-                      <p style={{ fontSize: "13px", fontWeight: "600", color: "#1a1a1a", margin: "0 0 6px" }}>
-                        {isRight ? "✅" : "❌"} Q{i + 1}. {q.questionText}
-                      </p>
-                      {q.category && (
-                        <span style={{ fontSize: "11px", background: "#E8F2EC", color: GREEN, padding: "2px 8px", borderRadius: "999px", fontWeight: "600", display: "inline-block", marginBottom: "6px" }}>
-                          {q.category}
-                        </span>
-                      )}
-                      {!isRight && selected !== -1 && (
-                        <p style={{ fontSize: "12px", color: "#dc2626", margin: "0 0 2px" }}>
-                          Your answer: {q.options[selected]}
-                        </p>
-                      )}
-                      {!isRight && selected === -1 && (
-                        <p style={{ fontSize: "12px", color: "#f59e0b", margin: "0 0 2px" }}>Not answered</p>
-                      )}
-                      <p style={{ fontSize: "12px", color: "#166534", margin: 0 }}>
-                        ✓ Correct: {q.options[q.correctAnswer]}
-                      </p>
-                      {q.explanation && (
-                        <p style={{ fontSize: "12px", color: "#555", margin: "6px 0 0", fontStyle: "italic", borderTop: "1px solid rgba(0,0,0,0.06)", paddingTop: "6px" }}>
-                          💡 {q.explanation}
-                        </p>
-                      )}
+                    <div key={cat} style={{ marginBottom:"10px" }}>
+                      <div style={{ display:"flex", justifyContent:"space-between", fontSize:"13px", marginBottom:"4px" }}>
+                        <span style={{ fontWeight:"600", color: GREEN_DARK }}>{cat}</span>
+                        <span style={{ color: pctColor(catPct), fontWeight:"700" }}>{catPct}% ({s.correct}/{s.total})</span>
+                      </div>
+                      <div style={{ height:"6px", background:"#eee", borderRadius:"99px" }}>
+                        <div style={{ height:"6px", width:`${catPct}%`, background: pctColor(catPct), borderRadius:"99px", transition:"width 0.6s ease" }} />
+                      </div>
                     </div>
                   );
                 })}
               </div>
-            </div>
-          )}
+            )}
 
-          {/* ── Back button ── */}
-          <button
-            onClick={() => navigate("/student")}
-            style={{ width: "100%", padding: "14px", fontSize: "15px", fontWeight: "600", background: GREEN, color: WHITE, border: "none", borderRadius: "14px", cursor: "pointer" }}
-            onMouseEnter={e => e.currentTarget.style.background = GREEN_DARK}
-            onMouseLeave={e => e.currentTarget.style.background = GREEN}
-          >
-            Back to Tests
-          </button>
-
+            {passed && (
+              <button onClick={handleDownloadCertificate} style={{ width:"100%", padding:"12px", background: GREEN, color: WHITE, border:"none", borderRadius:"12px", cursor:"pointer", marginBottom:"12px" }}>
+                🎓 Download Certificate
+              </button>
+            )}
+            <button onClick={() => navigate("/candidate")} style={{ width:"100%", padding:"12px", background:"#f3f4f6", color:"#555", border:"none", borderRadius:"12px", cursor:"pointer" }}>
+              Back to Tests
+            </button>
+          </div>
         </div>
       </div>
     );
   }
 
-  // ── Loading / error states ──
-  if (loading) return (
-    <div style={{ minHeight: "100vh", background: BG, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Segoe UI', sans-serif", color: "#aaa" }}>
-      Loading test…
-    </div>
-  );
+  // Main Test Screen
+  const answeredCount  = Object.keys(answers).length;
+  const isLowTime      = timeLeft !== null && timeLeft <= 60;
+  const attemptedCount = answeredCount;
+  const reviewCount    = markedForReview.length;
+  const totalCount     = questions.length;
 
-  if (error) return (
-    <div style={{ minHeight: "100vh", background: BG, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Segoe UI', sans-serif" }}>
-      <div style={{ background: WHITE, borderRadius: "16px", padding: "32px", maxWidth: "360px", textAlign: "center" }}>
-        <p style={{ color: "#dc2626", fontSize: "15px" }}>{error}</p>
-        <button onClick={() => navigate("/student")} style={{ padding: "10px 24px", background: GREEN, color: WHITE, border: "none", borderRadius: "10px", fontSize: "14px", fontWeight: "600", cursor: "pointer" }}>
-          Go Back
-        </button>
-      </div>
-    </div>
-  );
-
-  const answeredCount = Object.keys(answers).length;
-
-  // ── Test taking screen ──
   return (
-    <div style={{ minHeight: "100vh", background: BG, fontFamily: "'Segoe UI', sans-serif" }}>
+    <div style={{ minHeight:"100vh", background: BG, fontFamily:"'Segoe UI', sans-serif" }}>
 
-      {/* Top bar */}
-      <div style={{ padding: "16px 28px 0", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
-          <div style={{ width: "44px", height: "44px", borderRadius: "50%", background: WHITE, border: "0.5px solid rgba(0,0,0,0.1)", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <img src={`${import.meta.env.BASE_URL}Logo.png`} alt="Logo" style={{ width: "40px", height: "40px", objectFit: "contain" }} onError={e => { e.target.style.display = "none"; }} />
-          </div>
-          <div>
-            <div style={{ fontSize: "18px", fontWeight: "700", color: GREEN_DARK }}>{suite?.name}</div>
-            {suite?.description && <div style={{ fontSize: "12px", color: "#6B6B5E" }}>{suite.description}</div>}
+      {/* Timer Warning */}
+      {showWarning && (
+        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.5)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center" }}>
+          <div style={{ background: WHITE, padding:"30px", borderRadius:"20px", textAlign:"center" }}>
+            <h2>⚠️ 1 Minute Left</h2>
+            <p>Complete your answers quickly!</p>
+            <button onClick={() => setShowWarning(false)} style={{ background: GREEN, color: WHITE, padding:"10px 20px", border:"none", borderRadius:"8px" }}>OK</button>
           </div>
         </div>
-        <div style={{ fontSize: "13px", color: "#888" }}>
-          {answeredCount} / {questions.length} answered
+      )}
+
+      {/* Confirmation Modal */}
+      {showConfirm && (
+        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.5)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center" }}>
+          <div style={{ background: WHITE, padding:"32px", borderRadius:"24px", maxWidth:"400px", textAlign:"center" }}>
+            <h3>Submit Assessment?</h3>
+            <p>{answeredCount} of {questions.length} answered.</p>
+            {markedForReview.length > 0 && <p style={{ color: ORANGE }}>⚠️ {markedForReview.length} items still marked for review.</p>}
+            <div style={{ display:"flex", gap:"12px", marginTop:"20px" }}>
+              <button onClick={() => setShowConfirm(false)} style={{ flex:1, padding:"12px", borderRadius:"10px", border:"1px solid #ddd" }}>Review</button>
+              <button onClick={() => handleSubmitInternal(false)} style={{ flex:1, padding:"12px", borderRadius:"10px", background: GREEN, color: WHITE, border:"none" }}>Submit Now</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Header */}
+      <div style={{ background: WHITE, padding:"16px 28px", display:"flex", justifyContent:"space-between", alignItems:"center", position:"sticky", top:0, zIndex:100, boxShadow:"0 2px 10px rgba(0,0,0,0.05)" }}>
+        <div>
+          <h2 style={{ margin:0, fontSize:"18px", color: GREEN_DARK }}>{suite?.name}</h2>
+          <span style={{ fontSize:"12px", color:"#888" }}>{answeredCount} / {questions.length} Answered</span>
+        </div>
+        <div style={{ background: isLowTime ? "#fee2e2" : "#f0faf5", padding:"8px 16px", borderRadius:"999px", color: isLowTime ? "#dc2626" : GREEN, fontWeight:"bold" }}>
+          {formatTime(timeLeft)}
         </div>
       </div>
 
-      <div style={{ borderBottom: "0.5px solid rgba(0,0,0,0.09)", margin: "12px 0 0" }} />
+      {/* Main Layout */}
+      <div style={{ maxWidth:"1100px", margin:"24px auto", padding:"0 16px 120px", display:"flex", gap:"24px", alignItems:"flex-start" }}>
 
-      <div style={{ padding: "10px 28px" }}>
-        <span onClick={() => navigate("/student")} style={{ fontSize: "13px", color: "#4A7A5C", fontWeight: "500", cursor: "pointer" }}>← Back to tests</span>
-      </div>
+        {/* Question Navigation Panel */}
+        <div style={{ width:"220px", flexShrink:0, background: WHITE, borderRadius:"16px", padding:"20px", boxShadow:"0 4px 16px rgba(0,0,0,0.06)", position:"sticky", top:"80px" }}>
+          <h3 style={{ margin:"0 0 16px", fontSize:"15px", fontWeight:"700", color: GREEN_DARK }}>Questions</h3>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(4, 1fr)", gap:"8px", marginBottom:"20px" }}>
+            {questions.map((q, idx) => {
+              const isAnswered = answers[q._id]?.length > 0;
+              const isReview   = markedForReview.includes(idx);
+              const isCurrent  = currentQuestion === idx;
 
-      {/* Questions */}
-      <div style={{ padding: "8px 28px 100px", maxWidth: "720px" }}>
-        {questions.length === 0 ? (
-          <div style={{ background: WHITE, borderRadius: "16px", padding: "48px", textAlign: "center" }}>
-            <p style={{ color: "#aaa" }}>This test has no questions yet.</p>
+              let bg = WHITE, color = "#555", border = "1.5px solid #ddd";
+              if (isCurrent)       { bg = GREEN_DARK; color = WHITE; border = `1.5px solid ${GREEN_DARK}`; }
+              else if (isReview)   { bg = ORANGE;     color = WHITE; border = `1.5px solid ${ORANGE}`; }
+              else if (isAnswered) { bg = GREEN;      color = WHITE; border = `1.5px solid ${GREEN}`; }
+
+              return (
+                <button key={q._id} onClick={() => jumpToQuestion(idx)} style={{ width:"36px", height:"36px", borderRadius:"8px", background: bg, color, border, fontWeight:"600", fontSize:"13px", cursor:"pointer", transition:"all 0.15s" }}>
+                  {idx + 1}
+                </button>
+              );
+            })}
           </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-            {questions.map((q, idx) => (
-              <div key={q._id} style={{ background: WHITE, border: `1px solid ${answers[q._id] !== undefined ? GREEN : "#e5e7eb"}`, borderRadius: "14px", padding: "20px", transition: "border-color 0.2s" }}>
-                {q.category && (
-                  <span style={{ fontSize: "11px", background: "#E8F2EC", color: GREEN, padding: "2px 8px", borderRadius: "999px", fontWeight: "600", display: "inline-block", marginBottom: "8px" }}>
-                    {q.category}
-                  </span>
-                )}
-                <p style={{ fontSize: "15px", fontWeight: "600", color: "#1a1a1a", margin: "0 0 14px" }}>
-                  <span style={{ color: "#aaa", marginRight: "6px" }}>Q{idx + 1}.</span>{q.questionText}
-                  <span style={{ fontSize: "11px", color: "#aaa", fontWeight: "400", marginLeft: "8px" }}>({q.marks ?? 1} mark{(q.marks ?? 1) !== 1 ? "s" : ""})</span>
-                </p>
-                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                  {q.options.map((opt, i) => {
-                    const selected = answers[q._id] === i;
+          <div style={{ display:"flex", flexDirection:"column", gap:"8px", borderTop:"1px solid #eee", paddingTop:"16px" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:"8px", fontSize:"12px", color:"#555" }}>
+              <span style={{ width:"16px", height:"16px", borderRadius:"4px", background: GREEN, display:"inline-block", flexShrink:0 }} />
+              Attempted ({attemptedCount})
+            </div>
+            <div style={{ display:"flex", alignItems:"center", gap:"8px", fontSize:"12px", color:"#555" }}>
+              <span style={{ width:"16px", height:"16px", borderRadius:"4px", background: ORANGE, display:"inline-block", flexShrink:0 }} />
+              Marked for Review ({reviewCount})
+            </div>
+            <div style={{ display:"flex", alignItems:"center", gap:"8px", fontSize:"12px", color:"#555" }}>
+              <span style={{ width:"16px", height:"16px", borderRadius:"4px", background: WHITE, border:"1.5px solid #ddd", display:"inline-block", flexShrink:0 }} />
+              Not Attempted ({Math.max(0, totalCount - attemptedCount)})
+            </div>
+            <div style={{ display:"flex", alignItems:"center", gap:"8px", fontSize:"12px", color:"#555" }}>
+              <span style={{ width:"16px", height:"16px", borderRadius:"4px", background: GREEN_DARK, display:"inline-block", flexShrink:0 }} />
+              Current
+            </div>
+          </div>
+        </div>
+
+        {/* Questions List */}
+        <div style={{ flex:1 }}>
+          {questions.map((q, idx) => {
+            const isMarked   = markedForReview.includes(idx);
+            const isSelected = answers[q._id]?.length > 0;
+            const qCats      = getQuestionCats(q);
+
+            return (
+              <div
+                id={`question-${idx}`}
+                key={q._id}
+                onClick={() => setCurrentQuestion(idx)}
+                style={{ background: WHITE, borderRadius:"16px", padding:"24px", marginBottom:"16px", border:`2px solid ${isMarked ? ORANGE : isSelected ? "#c6e2d0" : "transparent"}`, cursor:"default" }}
+              >
+                {/* Progress bar */}
+                <div style={{ marginBottom:"12px" }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", fontSize:"11px", color:"#aaa", marginBottom:"4px" }}>
+                    <span>QUESTION {idx + 1} OF {questions.length}</span>
+                    <span>{Math.round(((idx + 1) / questions.length) * 100)}% COMPLETE</span>
+                  </div>
+                  <div style={{ height:"4px", background:"#eee", borderRadius:"99px" }}>
+                    <div style={{ height:"4px", width:`${((idx + 1) / questions.length) * 100}%`, background: GREEN, borderRadius:"99px" }} />
+                  </div>
+                </div>
+
+                <div style={{ display:"flex", justifyContent:"space-between", marginBottom:"12px" }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:"8px", flexWrap:"wrap" }}>
+                    <span style={{ fontWeight:"bold", color:"#aaa" }}>Q{idx + 1}</span>
+                    {/* Category tags */}
+                    {qCats.map(cat => (
+                      <span key={cat} style={{ background:"#f0faf5", color: GREEN_DARK, padding:"2px 10px", borderRadius:"999px", fontSize:"11px", fontWeight:"600", border:`1px solid #c6e2d0` }}>
+                        {cat}
+                      </span>
+                    ))}
+                  </div>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); handleMarkForReview(idx); }}
+                    style={{ background:"none", border:"none", cursor:"pointer", color: isMarked ? ORANGE : "#ccc", fontSize:"13px", whiteSpace:"nowrap" }}
+                  >
+                    {isMarked ? "★ Marked for Review" : "☆ Mark for Review"}
+                  </button>
+                </div>
+
+                <p style={{ fontSize:"16px", fontWeight:"600", marginBottom:"16px" }}>{q.questionText}</p>
+
+                <div style={{ display:"flex", flexDirection:"column", gap:"8px" }}>
+                  {q.options.map((opt, oIdx) => {
+                    const checked = (answers[q._id] || []).includes(oIdx);
                     return (
-                      <button
-                        key={i}
-                        onClick={() => handleSelect(q._id, i)}
-                        style={{
-                          textAlign: "left", padding: "10px 14px", borderRadius: "10px", fontSize: "14px",
-                          cursor: "pointer", fontFamily: "inherit",
-                          border:      selected ? `2px solid ${GREEN}` : "1px solid #e5e7eb",
-                          background:  selected ? "#E8F2EC" : WHITE,
-                          color:       selected ? GREEN_DARK : "#333",
-                          fontWeight:  selected ? "600" : "400",
-                          transition:  "all 0.15s",
-                        }}
-                      >
-                        <span style={{ marginRight: "8px", color: selected ? GREEN : "#aaa", fontWeight: "700" }}>
-                          {String.fromCharCode(65 + i)}.
-                        </span>
+                      <label key={oIdx} style={{ display:"flex", alignItems:"center", padding:"12px", borderRadius:"10px", background: checked ? "#f0faf5" : "#f9fafb", cursor:"pointer", border: checked ? `1px solid ${GREEN}` : "1px solid #eee", transition:"all 0.15s" }}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => handleSelect(q._id, oIdx)}
+                          style={{ marginRight:"12px", accentColor: GREEN }}
+                        />
                         {opt}
-                      </button>
+                      </label>
                     );
                   })}
                 </div>
               </div>
-            ))}
-          </div>
-        )}
+            );
+          })}
+        </div>
       </div>
 
-      {/* Sticky submit bar */}
-      {questions.length > 0 && (
-        <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: WHITE, borderTop: "1px solid #e5e7eb", padding: "14px 28px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div style={{ fontSize: "13px", color: "#888" }}>
-            <span style={{ fontWeight: "700", color: answeredCount === questions.length ? GREEN : "#f59e0b" }}>{answeredCount}</span>
-            /{questions.length} answered
-          </div>
-          <button
-            onClick={handleSubmit}
-            disabled={submitting}
-            style={{ padding: "12px 28px", fontSize: "15px", fontWeight: "600", background: GREEN, color: WHITE, border: "none", borderRadius: "12px", cursor: submitting ? "not-allowed" : "pointer", opacity: submitting ? 0.7 : 1 }}
-            onMouseEnter={e => { if (!submitting) e.currentTarget.style.background = GREEN_DARK; }}
-            onMouseLeave={e => { if (!submitting) e.currentTarget.style.background = GREEN; }}
-          >
-            {submitting ? "Submitting…" : "Submit Test"}
-          </button>
-        </div>
-      )}
+      {/* Submit Footer */}
+      <div style={{ position:"fixed", bottom:0, left:0, right:0, background: WHITE, padding:"20px", textAlign:"center", borderTop:"1px solid #eee" }}>
+        <button onClick={handleSubmitClick} disabled={submitting} style={{ padding:"14px 60px", background: GREEN, color: WHITE, border:"none", borderRadius:"999px", fontSize:"16px", fontWeight:"bold", cursor:"pointer" }}>
+          {submitting ? "Submitting..." : "Finish & Submit"}
+        </button>
+      </div>
     </div>
   );
 }

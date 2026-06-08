@@ -12,21 +12,23 @@ function Login() {
   const navigate = useNavigate();
 
   const handleLogin = async () => {
-    try {
-      const res = await axios.post(
-        "https://mcqtestportal-production.up.railway.app/api/auth/login",
-        { email, password }
-      );
-      localStorage.setItem("token", res.data.token);
-      localStorage.setItem("user", JSON.stringify(res.data.user));
+  try {
+    const res = await axios.post(
+      "https://charismatic-happiness-production-dc36.up.railway.app/api/auth/login",
+      { email, password }
+    );
 
-      if (res.data.user.role === "admin")           navigate("/dashboard");
-      else if (res.data.user.role === "superadmin") navigate("/superadmin");
-      else                                          navigate("/student");
-    } catch (err) {
-      alert(err.response?.data?.message || "Login Failed");
-    }
-  };
+    // ✅ Save token WITH Bearer prefix so all API calls work
+    localStorage.setItem("token", `Bearer ${res.data.token}`);
+    localStorage.setItem("user", JSON.stringify(res.data.user));
+
+    if (res.data.user.role === "admin")           navigate("/dashboard");
+    else if (res.data.user.role === "superadmin") navigate("/superadmin");
+    else                                          navigate("/candidate");
+  } catch (err) {
+    alert(err.response?.data?.message || "Login Failed");
+  }
+};
 
   const inputStyle = {
     width: "100%", border: "1px solid rgba(255,255,255,0.4)", borderRadius: "10px",
@@ -37,17 +39,18 @@ function Login() {
   };
 
   return (
-   <div style={{
-  minHeight: "100vh",
-  backgroundImage: `url(${import.meta.env.BASE_URL}background.png)`,
-  backgroundSize: "cover",
-  backgroundPosition: "center",
-  backgroundRepeat: "no-repeat",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  fontFamily: "'Segoe UI', sans-serif",
-}}>
+    <div style={{
+      minHeight: "100vh",
+      backgroundImage: `url(${import.meta.env.BASE_URL}background.png)`,
+      backgroundSize: "cover",
+      backgroundPosition: "center",
+      backgroundRepeat: "no-repeat",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontFamily: "'Segoe UI', sans-serif",
+      position: "relative",
+    }}>
       {/* Dark overlay */}
       <div style={{
         position: "absolute", inset: 0,
@@ -136,6 +139,22 @@ function Login() {
           <span style={{ color: WHITE, fontWeight: "700", textDecoration: "underline" }}>Register</span>
         </p>
       </div>
+
+      {/* Contact footer */}
+      <div style={{
+        position: "absolute", bottom: "16px", right: "20px", zIndex: 2,
+        textAlign: "right",
+      }}>
+        <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.7)", margin: 0, lineHeight: 1.6 }}>
+          For Queries Please Contact — IT Department
+        </p>
+        <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.7)", margin: 0, lineHeight: 1.6 }}>
+          📞 <a href="tel:9011020190" style={{ color: "rgba(255,255,255,0.9)", textDecoration: "none", fontWeight: "600" }}>9011020190</a>
+          {" · "}
+          <a href="mailto:crm@snehalaya.org" style={{ color: "rgba(255,255,255,0.9)", textDecoration: "none", fontWeight: "600" }}>crm@snehalaya.org</a>
+        </p>
+      </div>
+
     </div>
   );
 }

@@ -1,206 +1,143 @@
+// src/pages/ViewResults.jsx
 import { useEffect, useState } from "react";
 import axios from "axios";
+import "../styles/quiz.css";
 
-function ViewResults() {
+const API = import.meta.env.VITE_API_URL || "http://localhost:5000";
 
-  const [results, setResults] = useState([]);
-  const [user, setUser] = useState(null);
+export default function ViewResults() {
+  const [results, setResults]           = useState([]);
+  const [projects, setProjects]         = useState([]);
+  const [filterProject, setFilterProject] = useState("");
+  const [searchQuery, setSearchQuery]   = useState("");
+  const [loading, setLoading]           = useState(true);
 
   useEffect(() => {
-    const storedUser = JSON.parse(localStorage.getItem("user")) || null;
-    setUser(storedUser);
-    if (storedUser) {
-      fetchResults(storedUser);
-    }
-  }, []);
+    fetchProjects();
+    fetchResults();
+  }, [filterProject]);
 
-  const fetchResults = async (storedUser) => {
+  const fetchProjects = async () => {
     try {
-      let res;
-      // ✅ admin and superadmin see all results
-      if (storedUser.role === "admin" || storedUser.role === "superadmin") {
-        res = await axios.get(
-          "https://mcqtestportal-production.up.railway.app/api/results/all"
-        );
-      } else {
-        res = await axios.get(
-          `https://mcqtestportal-production.up.railway.app/api/results/my/${storedUser.email}`
-        );
-      }
-      setResults(res.data);
+      const res = await axios.get(`${API}/api/results/projects`);
+      setProjects(res.data);
     } catch (err) {
-      console.log(err);
+      console.error("Error fetching projects", err);
     }
   };
 
+  const fetchResults = async () => {
+    setLoading(true);
+    try {
+      const res = await axios.get(`${API}/api/results/all`, {
+        params: { project: filterProject, search: searchQuery }
+      });
+      setResults(res.data);
+    } catch (err) {
+      console.error("Error fetching results", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSearch = (e) => {
+    e.preventDefault();
+    fetchResults();
+  };
+
   return (
-    <div style={{ minHeight: "100vh", background: "#f5f1eb", padding: "40px" }}>
+    <div style={{ padding: "40px 20px", background: "#EEE9E0", minHeight: "100vh" }}>
+      <div style={{ maxWidth: "1200px", margin: "0 auto" }}>
 
-      {/* LOGO */}
-      <img
-        src="/Logo.png"
-        alt="logo"
-        style={{
-          position: "fixed",
-          top: "25px",
-          right: "25px",
-          width: "80px",
-          height: "80px",
-          objectFit: "contain",
-          borderRadius: "50%",
-          background: "white",
-          padding: "8px",
-          boxShadow: "0 4px 15px rgba(0,0,0,0.12)",
-          zIndex: 100,
-        }}
-      />
-
-      <div
-        style={{
-          maxWidth: "850px",
-          margin: "auto",
-          background: "white",
-          padding: "40px",
-          borderRadius: "25px",
-          boxShadow: "0 4px 15px rgba(0,0,0,0.08)",
-        }}
-      >
-        <p style={{ color: "#2d5d50", letterSpacing: "2px", fontSize: "13px" }}>
-          YOUR PROFILE
-        </p>
-
-        <h1 style={{ fontSize: "52px", marginBottom: "8px" }}>
-          Here is what we found
-        </h1>
-
-        {/* ✅ Student sees their own name */}
-        {user && user.role === "student" && (
-          <p style={{ color: "#888", fontSize: "16px", marginBottom: "30px" }}>
-            Results for <strong>{user.name}</strong> ({user.email})
-          </p>
-        )}
-
-        {/* ✅ Admin/superadmin sees a general heading */}
-        {user && (user.role === "admin" || user.role === "superadmin") && (
-          <p style={{ color: "#888", fontSize: "16px", marginBottom: "30px" }}>
-            Showing all student results
-          </p>
-        )}
-
-        {!results || results.length === 0 ? (
-          <h2 style={{ color: "#999", marginTop: "40px" }}>No Results Found</h2>
-        ) : (
-          results.map((result, index) => (
-            <div
-              key={index}
-              style={{
-                marginBottom: "50px",
-                borderBottom: index < results.length - 1 ? "2px solid #f0f0f0" : "none",
-                paddingBottom: "40px",
-              }}
+        <header style={{ marginBottom: "30px", display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: "16px" }}>
+          <div>
+            <h1 style={{ color: "#1A3D28", margin: 0 }}>Candidate Results</h1>
+            <p style={{ color: "#6B6B5E" }}>Overview of all assessment performances</p>
+          </div>
+          <div style={{ display: "flex", gap: "15px", flexWrap: "wrap" }}>
+            <form onSubmit={handleSearch} style={{ display: "flex", gap: "10px" }}>
+              <input
+                type="text"
+                placeholder="Search name, email, project..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                style={{ padding: "10px 15px", borderRadius: "8px", border: "1px solid #ccc", minWidth: "220px" }}
+              />
+              <button type="submit" style={{ background: "#2D5F3F", color: "white", border: "none", borderRadius: "8px", padding: "0 20px", cursor: "pointer" }}>
+                Search
+              </button>
+            </form>
+            <select
+              value={filterProject}
+              onChange={(e) => setFilterProject(e.target.value)}
+              style={{ padding: "10px", borderRadius: "8px", border: "1px solid #ccc", background: "white" }}
             >
-              {/* ✅ Admin/superadmin sees student name + score */}
-              {user && (user.role === "admin" || user.role === "superadmin") && (
-                <div style={{ marginBottom: "20px" }}>
-                  <h3 style={{ fontSize: "22px", color: "#333", margin: 0 }}>
-                    {result.userName}
-                  </h3>
-                  <p style={{ color: "#888", fontSize: "15px", marginTop: "4px" }}>
-                    {result.userEmail} &nbsp;|&nbsp; Score: {result.score} / {result.totalQuestions}
-                  </p>
-                </div>
-              )}
+              <option value="">All Projects</option>
+              {projects.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </div>
+        </header>
 
-              {/* ✅ Only students see overall score block */}
-              {user && user.role === "student" && (
-                <div
-                  style={{
-                    display: "inline-block",
-                    background: "#f0faf5",
-                    border: "2px solid #2d5d50",
-                    borderRadius: "16px",
-                    padding: "10px 24px",
-                    marginBottom: "28px",
-                    color: "#2d5d50",
-                    fontWeight: "700",
-                    fontSize: "16px",
-                  }}
-                >
-                  Overall Score: {result.score} / {result.totalQuestions}
-                </div>
-              )}
-
-              {/* Category Results */}
-              {result.categoryResults &&
-                result.categoryResults.length > 0 &&
-                result.categoryResults.map((item, i) => {
-
-                  const percentage = item.percentage;
-                  let level = "Low";
-                  if (percentage >= 70) level = "High";
-                  else if (percentage >= 40) level = "Moderate";
-
-                  const levelColor =
-                    level === "High" ? "#16a34a" :
-                    level === "Moderate" ? "#d97706" : "#dc2626";
-
+        {loading ? (
+          <div style={{ textAlign: "center", padding: "50px" }}>Loading data...</div>
+        ) : (
+          <div style={{ background: "white", borderRadius: "16px", overflow: "hidden", boxShadow: "0 4px 20px rgba(0,0,0,0.05)" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", textAlign: "left" }}>
+              <thead style={{ background: "#F9FAF8", borderBottom: "1px solid #EEE" }}>
+                <tr>
+                  <th style={{ padding: "18px" }}>Candidate</th>
+                  <th style={{ padding: "18px" }}>Project / Designation</th>
+                  <th style={{ padding: "18px" }}>Score</th>
+                  <th style={{ padding: "18px" }}>Percentage</th>
+                  <th style={{ padding: "18px" }}>Status</th>
+                  <th style={{ padding: "18px" }}>Date</th>
+                </tr>
+              </thead>
+              <tbody>
+                {results.map((res) => {
+                  const pct = res.totalMarks > 0
+                    ? Math.round((res.score / res.totalMarks) * 100)
+                    : 0;
                   return (
-                    <div key={i} style={{ marginBottom: "40px" }}>
-
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <h2 style={{ fontSize: "34px", margin: 0, color: "#111" }}>
-                          {item.category}
-                        </h2>
-                        <h3 style={{ color: "#777", margin: 0 }}>{percentage}%</h3>
-                      </div>
-
-                      <div style={{ width: "100%", height: "10px", background: "#ddd", borderRadius: "10px", overflow: "hidden", marginTop: "12px" }}>
-                        <div
-                          style={{
-                            width: `${percentage}%`,
-                            height: "100%",
-                            background: "#2d5d50",
-                            borderRadius: "10px",
-                            transition: "width 0.5s ease",
-                          }}
-                        ></div>
-                      </div>
-
-                      <div style={{ display: "flex", justifyContent: "space-between", marginTop: "14px" }}>
-                        <span
-                          style={{
-                            background: "#eee5d0",
-                            padding: "6px 16px",
-                            borderRadius: "20px",
-                            fontWeight: "700",
-                            fontSize: "14px",
-                            color: levelColor,
-                          }}
-                        >
-                          {level}
+                    <tr key={res._id} style={{ borderBottom: "1px solid #F0F0F0" }}>
+                      <td style={{ padding: "18px" }}>
+                        <div style={{ fontWeight: "600", color: "#1A3D28" }}>{res.userName}</div>
+                        <div style={{ fontSize: "12px", color: "#888" }}>{res.userEmail}</div>
+                      </td>
+                      <td style={{ padding: "18px" }}>
+                        <div style={{ fontSize: "14px" }}>{res.project || "—"}</div>
+                        <div style={{ fontSize: "11px", color: "#8A8A7E" }}>{res.designation || "—"}</div>
+                      </td>
+                      <td style={{ padding: "18px", fontWeight: "700" }}>
+                        {res.score} / {res.totalMarks}
+                      </td>
+                      <td style={{ padding: "18px" }}>{pct}%</td>
+                      <td style={{ padding: "18px" }}>
+                        <span style={{
+                          padding: "5px 12px", borderRadius: "20px",
+                          fontSize: "12px", fontWeight: "700",
+                          background: res.passed ? "#E8F2EC" : "#FDECEC",
+                          color: res.passed ? "#2D5F3F" : "#C53030"
+                        }}>
+                          {res.passed ? "PASS" : "FAIL"}
                         </span>
-                        <span style={{ color: "#666", fontSize: "14px" }}>
-                          Raw Score: {item.score}/{item.total}
-                        </span>
-                      </div>
-
-                      <p style={{ marginTop: "16px", color: "#666", lineHeight: "1.7", fontSize: "15px" }}>
-                        {level === "High"
-                          ? `Excellent performance in ${item.category}. Keep it up!`
-                          : level === "Moderate"
-                          ? `Average performance in ${item.category}. There is room to improve.`
-                          : `Needs improvement in ${item.category}. Focus on this area.`}
-                      </p>
-
-                    </div>
+                      </td>
+                      <td style={{ padding: "18px", fontSize: "13px", color: "#666" }}>
+                        {new Date(res.submittedAt).toLocaleDateString()}
+                      </td>
+                    </tr>
                   );
                 })}
-            </div>
-          ))
+              </tbody>
+            </table>
+            {results.length === 0 && (
+              <div style={{ padding: "40px", textAlign: "center", color: "#999" }}>
+                No results found matching your criteria.
+              </div>
+            )}
+          </div>
         )}
       </div>
     </div>
   );
 }
-
-export default ViewResults;
